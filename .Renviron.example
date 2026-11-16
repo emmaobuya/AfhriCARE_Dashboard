@@ -1,0 +1,11 @@
+# Copy this file to ".Renviron" (same folder as app.R) and fill in the values.
+# Never share or commit the real .Renviron -- the tokens give full data access.
+#
+# REDCAP_URL is your server's API address, normally ending in /api/
+REDCAP_URL=https://redcap.musph.ac.ug/api/
+
+# One token per REDCap project (Applications > API in each project).
+# Leave a token blank to see DEMO data for that tool.
+REDCAP_TOKEN_HSR=
+REDCAP_TOKEN_HWF=
+REDCAP_TOKEN_HFM=
