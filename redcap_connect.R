@@ -28,7 +28,7 @@ REDCAP_URL <- Sys.getenv("REDCAP_URL", unset = "https://redcap.musph.ac.ug/api/"
 TOKENS <- list(
   hsr = Sys.getenv("REDCAP_TOKEN_HSR", unset = "542E11901816B3CF26824A644F2D706E"),
   hwf = Sys.getenv("REDCAP_TOKEN_HWF", unset = "537C17A96FC737FD362B1EF2746ACF5E"),
-  hfm = Sys.getenv("REDCAP_TOKEN_HFM", unset = "")
+  hfm = Sys.getenv("REDCAP_TOKEN_HFM", unset = "D0249255541069E9169501FBB6030820")
 )
 
 REFRESH_SECONDS <- 900          # re-pull from REDCap every 15 minutes
