@@ -447,7 +447,3 @@ load_all_data <- function() {
   )
 }
 
-
-
-setwd("C:/Users/Personal/Desktop/Work/Africare")
-rsconnect::writeManifest(appDir = ".", appPrimaryDoc = "app.R")
