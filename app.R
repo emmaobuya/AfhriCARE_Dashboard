@@ -16,6 +16,10 @@ library(lubridate)
 
 source("redcap_connect.R")
 
+# Show the real error text in the app while we are setting it up.
+# Set to TRUE (or delete the line) once everything works.
+options(shiny.sanitize.errors = FALSE)
+
 # ------------------------------------------------------------------------------
 # Colours and small helpers
 # ------------------------------------------------------------------------------
@@ -41,6 +45,7 @@ no_rows_table <- function(msg) {
 }
 
 filter_survey <- function(df, hosp, rng) {
+  force(rng); force(hosp)
   if (nrow(df) == 0) return(df)
   if (hosp != "All") df <- df %>% filter(!is.na(hospital), hospital == hosp)
   df %>% filter(is.na(date) | (date >= rng[1] & date <= rng[2]))
@@ -273,7 +278,8 @@ server <- function(input, output, session) {
   rng <- reactive({
     req(input$dates)
     r <- as.Date(input$dates)
-    validate(need(!any(is.na(r)), "Pick a start and end date"))
+    # shiny:: is needed because jsonlite (loaded in redcap_connect.R) also has a validate()
+    shiny::validate(shiny::need(!any(is.na(r)), "Pick a start and end date"))
     r
   })
 
