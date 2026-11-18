@@ -125,6 +125,12 @@ parse_choices <- function(s) {
 
 get_token <- function(vars) {
   for (v in vars) { t <- Sys.getenv(v); if (nzchar(t)) return(t) }
+  # Fallback: any environment variable whose name contains both the tool
+  # code (HSR / HWF) and "TOKEN"
+  tool <- toupper(sub("^[A-Z_]*?(HSR|HWF).*$", "\\1", toupper(vars[1])))
+  env  <- Sys.getenv()
+  hit  <- names(env)[grepl(tool, toupper(names(env))) & grepl("TOKEN", toupper(names(env)))]
+  if (length(hit)) return(unname(env[hit[1]]))
   ""
 }
 
