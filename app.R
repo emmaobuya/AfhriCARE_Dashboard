@@ -15,6 +15,7 @@ library(plotly)
 library(lubridate)
 
 source("redcap_connect.R")
+source("data_checks.R")   # supervision checks for HSR and HWF (separate tabs)
 
 # Show the real error text in the app while we are setting it up.
 # Set to TRUE (or delete the line) once everything works.
@@ -163,6 +164,39 @@ bar_by <- function(df, var, colour = "#2a78d6") {
     layout(yaxis = list(title = ""), xaxis = list(title = "Completed interviews"))
 }
 
+# ---- Data-checks tab (one per tool) ----
+checks_tab <- function(id, title, note) {
+  nav_panel(
+    title,
+    p(class = "text-muted small", note),
+    uiOutput(paste0(id, "_chk_status")),
+    uiOutput(paste0(id, "_chk_boxes")),
+    layout_columns(
+      col_widths = c(6, 6),
+      card(card_header("Follow-up by RA"), DTOutput(paste0(id, "_chk_ra"))),
+      card(card_header("Questions most often left blank (skip-logic check)"),
+           DTOutput(paste0(id, "_chk_fields")))
+    ),
+    card(
+      card_header(
+        div(class = "d-flex justify-content-between align-items-center flex-wrap gap-2",
+            span("Records to follow up"),
+            div(class = "d-flex align-items-center gap-3 flex-wrap",
+                checkboxGroupInput(paste0(id, "_chk_sev"), NULL, inline = TRUE,
+                                   choices = SEV_LEVELS, selected = c("Critical", "High", "Review")),
+                downloadButton(paste0(id, "_chk_dl"), "Download (CSV)", class = "btn-sm")))
+      ),
+      DTOutput(paste0(id, "_chk_tbl"))
+    ),
+    card(card_header("What is checked"), uiOutput(paste0(id, "_chk_about")))
+  )
+}
+
+sev_badge <- function(txt, sev) {
+  span(style = paste0("background:", SEV_BG[[sev]], ";color:", SEV_FG[[sev]],
+                      ";padding:2px 6px;border-radius:3px;"), txt)
+}
+
 # ------------------------------------------------------------------------------
 # UI
 # ------------------------------------------------------------------------------
@@ -251,14 +285,13 @@ ui <- page_navbar(
     )
   ),
 
-  nav_panel(
-    "Data checks",
-    p(class = "text-muted small",
-      "Records the supervisors should follow up with the RA. Uses the Hospital and date filters ",
-      "(records with no date are always shown)."),
-    div(class = "mb-2", downloadButton("checks_dl", "Download list (CSV)", class = "btn-sm")),
-    card(DTOutput("checks"))
-  )
+  checks_tab("hsr", "Checks - HSR",
+             paste("Patient survey records the supervisors should follow up with the RA.",
+                   "Uses the Hospital and date filters (records with no date are always shown).")),
+
+  checks_tab("hwf", "Checks - HWF",
+             paste("Health worker survey records the supervisors should follow up with the RA.",
+                   "Uses the Hospital and date filters (records with no date are always shown)."))
 )
 
 # ------------------------------------------------------------------------------
@@ -473,26 +506,144 @@ server <- function(input, output, session) {
                   textAlign = "center")
   })
 
-  # ---- Data checks ----
-  checks_f <- reactive({
-    ck <- dat()$checks
-    if (nrow(ck) == 0) return(ck)
-    if (input$hosp != "All") ck <- ck %>% filter(Hospital == HOSPITALS[[input$hosp]])
+  # ---- Data checks (HSR and HWF on separate tabs) ----
+  # Re-run whenever the main data are refreshed (timer or Refresh button).
+  chk <- reactiveVal(run_all_checks())
+  observeEvent(dat(), chk(run_all_checks()), ignoreInit = TRUE)
+
+  hosp_match <- function(df, key) {
+    lab <- if (key %in% names(HOSPITALS)) HOSPITALS[[key]] else key
+    first <- tolower(strsplit(lab, " ")[[1]][1])
+    df$hosp_code == key | df$Hospital == lab | startsWith(tolower(df$Hospital), first)
+  }
+  chk_filter <- function(df) {
+    if (is.null(df) || nrow(df) == 0) return(df)
+    if (input$hosp != "All") df <- df[hosp_match(df, input$hosp), , drop = FALSE]
     r <- rng()
-    ck %>% filter(is.na(Date) | (Date >= r[1] & Date <= r[2]))
-  })
+    df[is.na(df$Date) | (df$Date >= r[1] & df$Date <= r[2]), , drop = FALSE]
+  }
 
-  output$checks <- renderDT({
-    ck <- checks_f()
-    if (nrow(ck) == 0) return(no_rows_table("Nothing to follow up for the current filters"))
-    datatable(ck %>% mutate(Date = format(Date, "%d %b %Y")), rownames = FALSE, class = "compact",
-              filter = "top", options = list(pageLength = 25, scrollX = TRUE))
-  })
+  make_check_outputs <- function(id) {
+    res <- reactive(chk()[[id]])
+    iss_all <- reactive({ x <- res(); if (isTRUE(x$ok)) chk_filter(x$issues) else NULL })
+    iss <- reactive({
+      x <- iss_all()
+      if (is.null(x) || nrow(x) == 0) return(x)
+      x[as.character(x$Severity) %in% input[[paste0(id, "_chk_sev")]], , drop = FALSE]
+    })
+    recs <- reactive({ x <- res(); if (isTRUE(x$ok)) chk_filter(x$meta) else NULL })
 
-  output$checks_dl <- downloadHandler(
-    filename = function() paste0("AFRHiCARE_UG_data_checks_", format(Sys.Date(), "%Y%m%d"), ".csv"),
-    content = function(file) write.csv(checks_f(), file, row.names = FALSE, na = "")
-  )
+    output[[paste0(id, "_chk_status")]] <- renderUI({
+      x <- res()
+      if (!isTRUE(x$ok)) return(div(class = "alert alert-danger py-2", strong("Checks not available. "), x$msg))
+      tagList(
+        p(class = "small text-muted mb-2", icon("clock"), " Checked ", format(x$checked_at, "%d %b %H:%M"),
+          " | ", x$n_checked, " consented records in REDCap"),
+        if (length(x$untranslated))
+          div(class = "alert alert-warning py-1 small",
+              "Skip logic could not be read for: ", paste(x$untranslated, collapse = ", "),
+              ". These questions were not checked for missing answers.")
+      )
+    })
+
+    output[[paste0(id, "_chk_boxes")]] <- renderUI({
+      a <- iss_all(); r <- recs()
+      if (is.null(r)) return(NULL)
+      a <- if (is.null(a)) data.frame(Severity = character(0), Record = character(0)) else a
+      n_sev <- function(s) sum(as.character(a$Severity) == s)
+      follow <- length(unique(a$Record[as.character(a$Severity) %in% c("Critical", "High")]))
+      layout_column_wrap(
+        width = 1 / 5, fill = FALSE,
+        value_box("Records checked", nrow(r), p(class = "small mb-0", "consented, current filters"),
+                  showcase = icon("clipboard-check"), theme = "secondary"),
+        value_box("Need follow-up", follow,
+                  p(class = "small mb-0", pct(follow, nrow(r)), " of records (Critical/High)"),
+                  showcase = icon("user-check"), theme = "primary"),
+        value_box("Critical", n_sev("Critical"), p(class = "small mb-0", "fix today"),
+                  showcase = icon("circle-exclamation"), theme = "danger"),
+        value_box("High", n_sev("High"), p(class = "small mb-0", "missing / contradictory data"),
+                  showcase = icon("triangle-exclamation"), theme = "warning"),
+        value_box("Review", n_sev("Review"), p(class = "small mb-0", "confirm with RA"),
+                  showcase = icon("magnifying-glass"), theme = "light")
+      )
+    })
+
+    output[[paste0(id, "_chk_ra")]] <- renderDT({
+      r <- recs(); a <- iss_all()
+      if (is.null(r) || nrow(r) == 0) return(no_rows_table("No consented records for the current filters"))
+      base <- r %>% count(RA, name = "Records")
+      if (!is.null(a) && nrow(a) > 0) {
+        sev <- a %>% count(RA, Severity) %>%
+          pivot_wider(names_from = Severity, values_from = n, values_fill = 0)
+        flagged <- a %>% filter(Severity %in% c("Critical", "High")) %>%
+          group_by(RA) %>% summarise(`Records to follow up` = n_distinct(Record), .groups = "drop")
+        base <- base %>% left_join(flagged, by = "RA") %>% left_join(sev, by = "RA")
+      }
+      for (cc in c("Records to follow up", SEV_LEVELS)) if (!cc %in% names(base)) base[[cc]] <- 0L
+      base <- base %>%
+        mutate(across(-RA, ~ coalesce(as.integer(.x), 0L)),
+               `% to follow up` = round(100 * `Records to follow up` / Records)) %>%
+        select(RA, Records, `Records to follow up`, `% to follow up`, all_of(SEV_LEVELS)) %>%
+        arrange(desc(`% to follow up`), desc(Critical))
+      datatable(base, rownames = FALSE, class = "compact",
+                options = list(dom = "t", paging = FALSE, scrollX = TRUE)) %>%
+        formatStyle("% to follow up", background = styleColorBar(c(0, 100), "#f6c5bf"),
+                    backgroundSize = "98% 70%", backgroundRepeat = "no-repeat", backgroundPosition = "center")
+    })
+
+    output[[paste0(id, "_chk_fields")]] <- renderDT({
+      x <- res()
+      if (!isTRUE(x$ok)) return(no_rows_table("Checks not available"))
+      m <- chk_filter(x$missing_long)
+      if (is.null(m) || nrow(m) == 0) return(no_rows_table("No skipped required questions for the current filters"))
+      out <- m %>%
+        group_by(Question = field, Label = label, Required = ifelse(required, "Yes", "Important")) %>%
+        summarise(Records = n_distinct(Record),
+                  `In completed forms` = n_distinct(Record[`Form status` != "Incomplete"]),
+                  RAs = n_distinct(RA), .groups = "drop") %>%
+        arrange(desc(`In completed forms`), desc(Records))
+      datatable(out, rownames = FALSE, class = "compact",
+                options = list(pageLength = 10, dom = "tp", scrollX = TRUE,
+                               columnDefs = list(list(width = "40%", targets = 1))))
+    })
+
+    output[[paste0(id, "_chk_tbl")]] <- renderDT({
+      x <- res()
+      if (!isTRUE(x$ok)) return(no_rows_table("Checks not available"))
+      a <- iss()
+      if (is.null(a) || nrow(a) == 0) return(no_rows_table("Nothing to follow up for the current filters"))
+      a <- a %>% mutate(Severity = as.character(Severity), Date = format(Date, "%d %b %Y")) %>%
+        select(Severity, Check, Record, Date, Hospital, RA, `Form status`, Details, Fields)
+      datatable(a, rownames = FALSE, class = "compact", filter = "top",
+                options = list(pageLength = 25, scrollX = TRUE,
+                               columnDefs = list(list(width = "30%", targets = 7)))) %>%
+        formatStyle("Severity", backgroundColor = styleEqual(names(SEV_BG), unname(SEV_BG)),
+                    color = styleEqual(names(SEV_FG), unname(SEV_FG)), fontWeight = "bold")
+    })
+
+    output[[paste0(id, "_chk_dl")]] <- downloadHandler(
+      filename = function() paste0("AFRHiCARE_UG_", toupper(id), "_checks_", format(Sys.Date(), "%Y%m%d"), ".csv"),
+      content = function(file) {
+        a <- iss()
+        if (is.null(a)) a <- data.frame(Message = "No checks available")
+        else a <- a %>% mutate(Severity = as.character(Severity)) %>% select(-any_of("hosp_code"))
+        write.csv(a, file, row.names = FALSE, na = "")
+      }
+    )
+
+    output[[paste0(id, "_chk_about")]] <- renderUI({
+      tagList(
+        p(class = "small mb-2", sev_badge("Critical", "Critical"), " fix today  ",
+          sev_badge("High", "High"), " missing or contradictory data  ",
+          sev_badge("Review", "Review"), " confirm with the RA  ",
+          sev_badge("In progress", "In progress"), " blanks in forms not yet marked Complete"),
+        tags$ul(class = "small", lapply(CHECK_ABOUT[[id]], function(t) tags$li(HTML(t))))
+      )
+    })
+  }
+
+  make_check_outputs("hsr")
+  make_check_outputs("hwf")
 }
 
 shinyApp(ui, server)
