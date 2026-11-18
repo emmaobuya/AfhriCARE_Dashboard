@@ -28,21 +28,26 @@
 suppressPackageStartupMessages({
   library(dplyr)
   library(tidyr)
-  library(httr)
+  library(curl)
   library(jsonlite)
 })
 
 # ------------------------------------------------------------------------------
-# SETTINGS -- check these against your .Renviron
+# SETTINGS
 # ------------------------------------------------------------------------------
+# The REDCap URL and API tokens are NOT set here. They are taken from
+# redcap_connect.R (REDCAP_URL and TOKENS$hsr / TOKENS$hwf), so the checks
+# always use exactly the same connection as the rest of the dashboard.
+# redcap_connect.R must be sourced BEFORE this file (app.R already does this).
+#
+# "form" is the REDCap instrument name. If it does not match, the app finds the
+# right one automatically from the form that holds key_field.
 CHECK_CFG <- list(
   hsr = list(
     label      = "HSR (patients)",
     form       = "health_system_responsiveness_survey",
     ra         = "ra_hrs", ra_other = "ra_hrs_2",
     key_field  = "q10_age",          # any answer here means the interview started
-    # The first of these environment variables that is set is used as the token.
-    token_vars = c("REDCAP_TOKEN_HSR", "HSR_TOKEN", "REDCAP_HSR_TOKEN", "TOKEN_HSR"),
     dict_csv   = "dictionaries/HSR_dictionary.csv",   # used only if the API metadata call fails
     # Optional (not required) questions that supervisors still want answered
     important_optional = c("q10a_respondent_relationship", "q33_is_sleep_disturbance",
@@ -53,7 +58,6 @@ CHECK_CFG <- list(
     form       = "afrhicare_health_workforce_round_2_survey",
     ra         = "ra_hwf", ra_other = "ra_hwf_2",
     key_field  = "q9_age",
-    token_vars = c("REDCAP_TOKEN_HWF", "HWF_TOKEN", "REDCAP_HWF_TOKEN", "TOKEN_HWF"),
     dict_csv   = "dictionaries/HWF_dictionary.csv",
     important_optional = c("q0_previous_round", "q8a_other_department", "q52_supervisor_sex",
                            "q53_supervisor_equality", "q53_supervisor_respect",
@@ -123,27 +127,36 @@ parse_choices <- function(s) {
   setNames(trimws(sub("^[^,]*,", "", parts)), trimws(sub(",.*$", "", parts)))
 }
 
-get_token <- function(vars) {
-  for (v in vars) { t <- Sys.getenv(v); if (nzchar(t)) return(t) }
-  # Fallback: any environment variable whose name contains both the tool
-  # code (HSR / HWF) and "TOKEN"
-  tool <- toupper(sub("^[A-Z_]*?(HSR|HWF).*$", "\\1", toupper(vars[1])))
-  env  <- Sys.getenv()
-  hit  <- names(env)[grepl(tool, toupper(names(env))) & grepl("TOKEN", toupper(names(env)))]
-  if (length(hit)) return(unname(env[hit[1]]))
-  ""
+# Token for a tool: from TOKENS in redcap_connect.R first, then the
+# environment variable REDCAP_TOKEN_HSR / REDCAP_TOKEN_HWF as a fallback.
+get_token <- function(tool) {
+  t <- ""
+  if (exists("TOKENS", inherits = TRUE)) t <- trimws(as.character(TOKENS[[tool]] %||% ""))
+  if (!nzchar(t)) t <- trimws(Sys.getenv(paste0("REDCAP_TOKEN_", toupper(tool))))
+  t
+}
+
+get_url <- function() {
+  u <- if (exists("REDCAP_URL", inherits = TRUE)) REDCAP_URL else Sys.getenv("REDCAP_URL")
+  if (!nzchar(u)) u <- "https://redcap.musph.ac.ug/api/"
+  u
 }
 
 # ------------------------------------------------------------------------------
 # REDCap API
 # ------------------------------------------------------------------------------
 redcap_post <- function(token, content, extra = list()) {
-  url <- Sys.getenv("REDCAP_URL")
-  if (!nzchar(url)) stop("REDCAP_URL is not set in .Renviron")
-  body <- c(list(token = token, content = content, format = "json", returnFormat = "json"), extra)
-  res <- httr::POST(url, body = body, encode = "form", httr::timeout(120))
-  txt <- httr::content(res, as = "text", encoding = "UTF-8")
-  if (httr::http_error(res)) stop("REDCap ", content, " export failed: ", substr(txt, 1, 200))
+  params <- c(list(token = token, content = content, format = "json", returnFormat = "json"), extra)
+  params <- vapply(params, as.character, character(1))
+  body <- paste(paste0(names(params), "=", curl::curl_escape(params)), collapse = "&")
+  h <- curl::new_handle()
+  curl::handle_setheaders(h, "Content-Type" = "application/x-www-form-urlencoded")
+  curl::handle_setopt(h, postfields = body, timeout = 180)
+  res <- curl::curl_fetch_memory(get_url(), handle = h)
+  txt <- rawToChar(res$content); Encoding(txt) <- "UTF-8"
+  if (res$status_code >= 400) stop("REDCap ", content, " export failed (HTTP ", res$status_code, "): ",
+                                   substr(txt, 1, 200))
+  if (trimws(txt) %in% c("", "[]")) return(data.frame())
   out <- jsonlite::fromJSON(txt, simplifyVector = TRUE)
   if (length(out) == 0) return(data.frame())
   as.data.frame(out, stringsAsFactors = FALSE)
@@ -537,14 +550,18 @@ hwf_checks <- function(d, dd, meta, consented) {
 # ------------------------------------------------------------------------------
 run_tool_checks <- function(tool) {
   cfg <- CHECK_CFG[[tool]]
-  token <- get_token(cfg$token_vars)
+  token <- get_token(tool)
   if (!nzchar(token)) {
-    return(list(ok = FALSE, msg = paste0("No API token found for ", cfg$label, ". Set one of: ",
-                                         paste(cfg$token_vars, collapse = ", "), " in .Renviron.")))
+    return(list(ok = FALSE, msg = paste0("No API token for ", cfg$label,
+                                         ". Put it in TOKENS$", tool, " in redcap_connect.R.")))
   }
   dd <- load_dict(cfg, token)
   d  <- redcap_post(token, "record", list(type = "flat", rawOrLabel = "raw", rawOrLabelHeaders = "raw",
                                           exportCheckboxLabel = "false", exportSurveyFields = "true"))
+  # Use the instrument that actually holds the key question (e.g. the HWF form
+  # may be named ..._baseline_survey or ..._round_2_survey in REDCap)
+  real_form <- dd$form_name[dd$field_name == cfg$key_field][1]
+  if (!is.na(real_form) && nzchar(real_form)) cfg$form <- real_form
   if (nrow(d) == 0) return(list(ok = TRUE, issues = NULL, missing_long = NULL, meta = NULL,
                                 n_checked = 0, untranslated = character(0), checked_at = Sys.time()))
   d[] <- lapply(d, function(x) { x <- as.character(x); x[is.na(x)] <- ""; x })
