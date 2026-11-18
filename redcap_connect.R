@@ -25,10 +25,29 @@ library(stringr)
 # ------------------------------------------------------------------------------
 REDCAP_URL <- Sys.getenv("REDCAP_URL", unset = "https://redcap.musph.ac.ug/api/")
 
+# API TOKENS -- used by every tab, including Checks - HSR and Checks - HWF.
+# Either:
+#   (a) SAFER: set REDCAP_TOKEN_HSR / REDCAP_TOKEN_HWF / REDCAP_TOKEN_HFM as
+#       environment variables (.Renviron locally, or the "Environment variables"
+#       settings of your hosting service) and leave the quotes below empty; or
+#   (b) paste each token between the quotes below.
+# If you use (b), keep the GitHub repository PRIVATE: anyone who can read
+# this file can download the study data.
+PASTED_TOKENS <- list(
+  hsr = "542E11901816B3CF26824A644F2D706E",   # HSR  -- patients / caregivers
+  hwf = "537C17A96FC737FD362B1EF2746ACF5E",   # HWF  -- health workers
+  hfm = "D0249255541069E9169501FBB6030820"    # HFM  -- health facility mapping
+)
+
+pick_token <- function(env_var, pasted) {
+  t <- trimws(Sys.getenv(env_var, unset = ""))
+  if (nzchar(t)) t else trimws(pasted)
+}
+
 TOKENS <- list(
-  hsr = Sys.getenv("REDCAP_TOKEN_HSR", unset = "542E11901816B3CF26824A644F2D706E"),
-  hwf = Sys.getenv("REDCAP_TOKEN_HWF", unset = "537C17A96FC737FD362B1EF2746ACF5E"),
-  hfm = Sys.getenv("REDCAP_TOKEN_HFM", unset = "D0249255541069E9169501FBB6030820")
+  hsr = pick_token("REDCAP_TOKEN_HSR", PASTED_TOKENS$hsr),
+  hwf = pick_token("REDCAP_TOKEN_HWF", PASTED_TOKENS$hwf),
+  hfm = pick_token("REDCAP_TOKEN_HFM", PASTED_TOKENS$hfm)
 )
 
 REFRESH_SECONDS <- 900          # re-pull from REDCap every 15 minutes
@@ -140,6 +159,17 @@ col <- function(df, name) {
   if (name %in% names(df)) blank_to_na(df[[name]]) else rep(NA_character_, nrow(df))
 }
 
+# the first of several possible column names that exists (e.g. a form renamed
+# between rounds)
+col_any <- function(df, names_try) {
+  hit <- names_try[names_try %in% names(df)]
+  col(df, if (length(hit)) hit[1] else names_try[1])
+}
+
+# HWF instrument: Round 2 form name first, baseline name as fallback
+HWF_FORMS <- c("afrhicare_health_workforce_round_2_survey",
+               "afrhicare_health_workforce_baseline_survey")
+
 to_date <- function(x) {
   x <- blank_to_na(x)
   out <- suppressWarnings(parse_date_time(x, orders = c("Ymd HMS", "Ymd HM", "Ymd", "dmY HMS", "dmY"),
@@ -244,8 +274,8 @@ clean_hwf <- function(raw) {
     date       = coalesce(to_date(col(raw, "q1_date_survey")),
                           to_date(col(raw, "date_today")),
                           to_date(col(raw, "survey_timestamp")),
-                          to_date(col(raw, "afrhicare_health_workforce_baseline_survey_timestamp"))),
-    status     = form_status(col(raw, "afrhicare_health_workforce_baseline_survey_complete")),
+                          to_date(col_any(raw, paste0(HWF_FORMS, "_timestamp")))),
+    status     = form_status(col_any(raw, paste0(HWF_FORMS, "_complete"))),
     department = col(raw, "q8_department"),
     profession = col(raw, "q22_health_profession"),
     sex        = col(raw, "q10_gender"),
@@ -446,4 +476,3 @@ load_all_data <- function() {
     demo = demo, errors = errors, synced = Sys.time()
   )
 }
-
